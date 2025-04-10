@@ -732,6 +732,7 @@ func (ap *awsKMSSignPlugin) SignDigest(ctx context.Context, digest []byte, keyID
 		return "", fmt.Errorf("kms: failed to sign digest: %w", err)
 	}
 
+
 	return signature, nil
 }
 

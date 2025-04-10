@@ -1,6 +1,8 @@
 package rest
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -151,7 +153,6 @@ func azureManagedIdentitiesTokenRequest(
 	if err != nil {
 		return token, err
 	}
-
 	return token, nil
 }
 
@@ -177,4 +178,82 @@ func buildAzureManagedIdentitiesRequestPath(
 	}
 
 	return endpoint + "?" + params.Encode()
+}
+
+type azureKeyVaultSignPlugin struct {
+	config  azureKeyVaultConfig
+	tokener func() (string, error)
+}
+
+func newKeyVaultSignPlugin(ap *azureManagedIdentitiesAuthPlugin) *azureKeyVaultSignPlugin {
+	return &azureKeyVaultSignPlugin{
+		tokener: func() (string, error) {
+			resp, err := azureManagedIdentitiesTokenRequest(ap.Endpoint, ap.APIVersion, ap.Resource, ap.ObjectID, ap.ClientID, ap.MiResID, ap.UseAppServiceMsi)
+			if err != nil {
+				return "", err
+			}
+			return resp.AccessToken, nil
+		},
+	}
+}
+
+type kvRequest struct {
+	Alg   string `json:"alg"`
+	Value string `json:"value"`
+}
+
+type kvResponse struct {
+	KID   url.URL `json:"kid"`
+	Value string  `json:"value"`
+}
+
+func (ap *azureKeyVaultSignPlugin) SignDigest(ctx context.Context, digest []byte, alg string) (string, error) {
+	tkn, err := ap.tokener()
+	if err != nil {
+		return "", err
+	}
+
+	if ap.config.URL.Host == "" {
+		return "", errors.New("bad stuff")
+	}
+
+	signingURL := ap.config.URL.JoinPath("keys", ap.config.Key, ap.config.KeyVersion, "sign")
+	q := signingURL.Query()
+	q.Set("api-version", ap.config.APIVersion)
+	signingURL.RawQuery = q.Encode()
+
+	reqBody, err := json.Marshal(kvRequest{Alg: alg, Value: string(digest)})
+	if err != nil {
+		return "", err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, signingURL.String(), bytes.NewBuffer(reqBody))
+	if err != nil {
+		return "", err
+	}
+
+	req.Header.Add("Authorization", fmt.Sprintf("Bearer %s", tkn))
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return "", errors.New("nono 200")
+	}
+	defer resp.Body.Close()
+
+	respBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", errors.New("oopsi no resp")
+	}
+
+	var res kvResponse
+	err = json.Unmarshal(respBytes, &res)
+	if err != nil {
+		return "", errors.New("not kvResponse")
+	}
+
+	return res.Value, nil
 }
